@@ -1,0 +1,8 @@
+tests/
+dr_flac.h
+sokol_audio.h
+dr_mp3.h
+qsaconv
+qsaplay
+qsatest
+*.exe
