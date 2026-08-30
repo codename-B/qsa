@@ -5,9 +5,14 @@ SPDX-License-Identifier: MIT
 
 Round trip test for qsa.h.
 
+This implementation gives the QSA3 golden hashes. The decoded hash is the
+same as the QSA2 hash. QSA3 only adds the codebook to the header and
+exchanges entries 0 and 153 of the built-in table. Thus the same signal must
+decode to the same samples, because the encoder writes the new indices. The
+encoded size increases by QSA_CODEBOOK_SIZE bytes.
+
 The test signal uses only integer arithmetic. Thus you can make the same
-signal outside C. The golden hashes below hold the bitstream constant. If a
-hash does not agree, qsa.h no longer obeys the format.
+signal outside C. If a hash does not agree, qsa.h no longer obeys the format.
 
 To compile:
 	gcc qsatest.c -std=c99 -lm -O3 -o qsatest
@@ -27,8 +32,8 @@ Give --dump-wav <path> to write the test signal to a WAV file.
 
 #define QSATEST_SAMPLES 83154
 
-#define QSATEST_ENCODED_SIZE 21804
-#define QSATEST_ENCODED_HASH 0x1478b63f35089d0cULL
+#define QSATEST_ENCODED_SIZE 23852
+#define QSATEST_ENCODED_HASH 0x75eb8167ebb302a9ULL
 #define QSATEST_DECODED_HASH 0x93fd0aae94d48c56ULL
 
 static int failures = 0;

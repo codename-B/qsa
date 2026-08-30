@@ -232,10 +232,36 @@ short *qsaconv_wav_read(const char *path, qsaconv_pcm_desc *desc) {
 /* -----------------------------------------------------------------------------
 	Main */
 
+static short qsaconv_codebook[256][4];
+
+static void qsaconv_load_codebook(const char *path, qsa_desc *qsa) {
+	FILE *f = fopen(path, "rb");
+	QSACONV_ASSERT(f, "Can't open codebook %s", path);
+	unsigned char raw[QSA_CODEBOOK_SIZE];
+	int read = fread(raw, 1, sizeof(raw), f);
+	int extra = fgetc(f);
+	fclose(f);
+	QSACONV_ASSERT(read == QSA_CODEBOOK_SIZE && extra == EOF,
+		"Codebook %s is not exactly %d bytes", path, QSA_CODEBOOK_SIZE);
+	for (int i = 0; i < 256 * 4; i++) {
+		qsaconv_codebook[i >> 2][i & 3] =
+			(short)(raw[i * 2] | ((unsigned int)raw[i * 2 + 1] << 8));
+	}
+	QSACONV_ASSERT(
+		!qsaconv_codebook[0][0] && !qsaconv_codebook[0][1] &&
+		!qsaconv_codebook[0][2] && !qsaconv_codebook[0][3],
+		"Codebook entry 0 must be the all-zero vector"
+	);
+	qsa->codebook = qsaconv_codebook;
+}
+
 int main(int argc, char **argv) {
 	QSACONV_ASSERT(argc >= 3,
 		"\nUsage: qsaconv in.{wav,mp3,flac,qsa} out.{wav,qsa}"
 		"\n       [--chunk-samples N] [--slice-samples N] [--shape N]"
+		"\n       [--codebook file.bin]   raw 2048-byte table, int16 LE,"
+		"\n                               entry 0 all-zero; replaces the"
+		"\n                               built-in codebook"
 	)
 
 	qsaconv_pcm_desc desc;
@@ -254,6 +280,9 @@ int main(int argc, char **argv) {
 		}
 		else if (strcmp(argv[i], "--shape") == 0) {
 			qsa.shape_lambda = atof(argv[i + 1]);
+		}
+		else if (strcmp(argv[i], "--codebook") == 0) {
+			qsaconv_load_codebook(argv[i + 1], &qsa);
 		}
 		else {
 			QSACONV_ABORT("Unknown option %s", argv[i]);

@@ -2,11 +2,12 @@
 
 QSA is a tiny, lossy audio codec for machines that cannot afford much of a
 codec at all. It is mono, works at any sample rate, and codes residuals as
-one byte per 4 samples, an index into a fixed trained codebook, plus a 4-bit
-quantiser scale per 64-sample slice. That comes out at about 2.1 bits per
-sample, or 19.6 kbit/s at the default 9360 hz, so 90 minutes of audio is
-about 13 MB. The decoder is integer only: no floating point, and the
-per-sample path is one table read, a multiply, a shift and an add.
+one byte per 4 samples, an index into a 256-entry trained codebook carried
+in the file (2 kB, once), plus a 4-bit quantiser scale per 64-sample slice.
+That comes out at about 2.1 bits per sample, or 19.6 kbit/s at the default
+9360 hz, so 90 minutes of audio is about 13 MB. The decoder is integer only:
+no floating point, and the per-sample path is one table read, a multiply, a
+shift and an add.
 
 Single-file MIT licensed library for C/C++. See [qsa.h](qsa.h) for the
 documentation and format specification.
@@ -26,10 +27,15 @@ happens when you need to halve that: it keeps QOA's per-slice scaling, with a
 4-bit scale every 64 samples, and pins the residual at 2 bits per sample.
 
 Rather than four independent 2-bit residuals, QSA spends its 8 bits per
-4-sample group on one index into a 256-entry codebook of residual vectors,
-made by closed-loop k-means. A codebook of vectors can represent correlated
-shapes that a scalar grid cannot, and it makes the decoder simpler: one table
-read per group instead of bit unpacking.
+4-sample group on one index into a 256-entry codebook of residual vectors.
+Since QSA3 the codebook is stored in the file header (2 kB), so material can
+carry a table trained on itself -- `qsaconv --codebook file.bin` -- with a
+built-in table, made by closed-loop k-means, as the default. Entry 0 is
+always the all-zero vector, so digital silence encodes to exact digital
+silence, and the encoder spots all-zero groups without searching. A codebook
+of vectors can represent correlated shapes that a scalar grid cannot, and it
+makes the decoder simpler: one table read per group instead of bit
+unpacking.
 
 QSA changes a few more things on top of QOA's design. The LMS weights leak:
 every fourth sample each weight loses `weight >> 7`, because at 2 bits the

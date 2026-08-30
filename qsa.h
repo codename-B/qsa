@@ -21,13 +21,16 @@ All values are little endian. This is the file layout:
 
 struct {
 	struct {
-		char     magic[4];      // magic bytes "QSA2"
+		char     magic[4];      // magic bytes "QSA3"
 		uint32_t samples;        // total samples in this file
 		uint32_t samplerate;     // samples per second
 		uint16_t chunk_samples;  // samples per chunk, multiple of 8 and of slice_samples
 		uint16_t slice_samples;  // samples per scale, multiple of 4, divides chunk_samples
 		uint32_t chunks;         // number of chunks
 	} file_header;
+
+	int16_t codebook[256][4];    // the residual codebook, 8.8 fixed point;
+	                             // entry 0 must be the all-zero vector
 
 	uint32_t index[chunks + 1];  // byte offset of each chunk, plus the file size
 
@@ -46,19 +49,30 @@ increases the remainder to a full slice and adds zeros. The decoder decodes
 these pad samples, but they are not part of the file's sample count.
 
 QSA quantises the residuals as vectors. Each index byte selects one 4-sample
-vector from qsa_codebook. That table has 256 entries and is part of the
-format. To dequantise residual i of a group, calculate
+vector from the file's codebook. That table has 256 entries and comes
+immediately after the fixed header. To dequantise residual i of a group,
+calculate
 
-	(qsa_codebook[index][i] * qsa_scale_tab[scale]) >> 8
+	(codebook[index][i] * qsa_scale_tab[scale]) >> 8
 
 with an arithmetic shift. Then add the LMS prediction and clamp the result to
-16 bits. Closed-loop k-means made the codebook. The first entries were the
+16 bits.
+
+From QSA3, the codebook travels with the file. Thus a file can carry a table
+trained on its own material. qsa_encode() writes the table that
+qsa_desc.codebook points at, and qsa_desc_init() points it at the built-in
+table.
+
+Closed-loop k-means made the built-in table. The first entries were the
 product codebook {-4, -1, 1, 4}^4 in 8.8 fixed point. The training moved the
 entries to correlated shapes that a scalar grid cannot make. This gives about
 2 dB at the same bit rate.
 
-Entry 153 is the reserved vector of zeros. Without it, the encoder must add
+Entry 0 is the reserved vector of zeros, and qsa_decode_header() refuses a
+file that disobeys this rule. Without a zero vector, the encoder must add
 energy to digital silence. The LMS feedback then makes an audible idle tone.
+With the zero vector, silent input encodes to zero residuals and decodes to
+exact digital silence.
 
 The LMS filter is QOA's filter with two changes. First, the weights leak. At
 every fourth sample, each weight loses weight >> 7 before the sign-sign
@@ -86,9 +100,10 @@ bitstream and the decoder do not use it.
 extern "C" {
 #endif
 
-#define QSA_MAGIC 0x32415351 /* 'QSA2' */
-#define QSA_HEADER_SIZE 20
-#define QSA_MIN_FILESIZE 28
+#define QSA_MAGIC 0x33415351 /* 'QSA3' */
+#define QSA_CODEBOOK_SIZE 2048          /* 256 entries x 4 x int16 */
+#define QSA_HEADER_SIZE (20 + QSA_CODEBOOK_SIZE)
+#define QSA_MIN_FILESIZE (QSA_HEADER_SIZE + 8)
 #define QSA_DEFAULT_SAMPLERATE 9360
 #define QSA_LMS_LEN 4
 #define QSA_LMS_LEAK_SHIFT 7
@@ -115,6 +130,11 @@ typedef struct {
 	unsigned int slice_samples;
 	unsigned int chunks;
 	double shape_lambda;
+	/* The residual codebook for this stream. qsa_desc_init() points it at
+	the built-in table. qsa_decode_header() points it at the table in the
+	file, which it reads in place because the format is little endian.
+	Entry 0 must be the vector of zeros. */
+	const short (*codebook)[4];
 	#ifdef QSA_RECORD_TOTAL_ERROR
 		double error;
 	#endif
@@ -163,10 +183,12 @@ static const int qsa_scale_tab[QSA_SCALE_COUNT] = {
 	256, 384, 512, 768, 1024, 1536, 2048, 3072
 };
 
-/* The residual codebook in 8.8 fixed point: 256 vectors of 4 samples. */
+/* The built-in residual codebook in 8.8 fixed point: 256 vectors of 4
+samples. The encoder uses it by default, and each file holds its own copy.
+Entry 0 is the reserved vector of zeros. */
 
 static const short qsa_codebook[256][4] = {
-	{ -1602,  -1770,  -1777,  -1607}, {  -664,  -1518,  -2119,  -1510},
+	{     0,      0,      0,      0}, {  -664,  -1518,  -2119,  -1510},
 	{   -26,   -907,  -1856,  -1767}, {   190,    -63,  -1634,  -2113},
 	{  -905,  -1018,  -1355,  -1601}, {  -363,   -470,  -1155,  -1282},
 	{   206,   -318,  -1241,  -1058}, {  1051,    -41,  -1641,  -1580},
@@ -242,7 +264,7 @@ static const short qsa_codebook[256][4] = {
 	{    46,   -861,   -351,    269}, {   717,   -789,   -341,    435},
 	{  -753,   -486,   -223,    131}, {  -261,   -379,   -220,     84},
 	{   200,   -284,   -212,    165}, {   830,   -167,   -277,    214},
-	{  -680,     60,   -135,    242}, {     0,      0,      0,      0},
+	{  -680,     60,   -135,    242}, { -1602,  -1770,  -1777,  -1607},
 	{   383,    176,    -29,    190}, {  1138,    332,    -26,    257},
 	{  -435,   1533,     78,     -5}, {  -180,    558,    -93,    209},
 	{   501,    726,    -35,    288}, {  1131,    871,    206,    210},
@@ -372,6 +394,7 @@ void qsa_desc_init(qsa_desc *desc) {
 	desc->slice_samples = QSA_DEFAULT_SLICE_SAMPLES;
 	desc->chunks = 0;
 	desc->shape_lambda = QSA_DEFAULT_SHAPE_LAMBDA;
+	desc->codebook = qsa_codebook;
 	#ifdef QSA_RECORD_TOTAL_ERROR
 		desc->error = 0;
 	#endif
@@ -392,21 +415,27 @@ typedef struct {
 /* Quantises one group of 4 samples at a given scale, and tests all codebook
 entries. Returns the shaped cost, writes the best index and its squared
 error, and moves the state forward. Stops a trial when its cost becomes more
-than the best cost. */
+than the best cost. A group of zeros takes entry 0 with no search, thus
+digital silence encodes very quickly. */
 
-static double qsa_encode_group(const short *samples, int scale, double lambda, qsa_enc_state_t *state, unsigned char *index_out, double *plain_energy) {
+static double qsa_encode_group(const short *samples, const short (*codebook)[4], int scale, double lambda, qsa_enc_state_t *state, unsigned char *index_out, double *plain_energy) {
 	int best = 0;
 	double best_cost = -1;
 	double best_plain = 0;
 	qsa_enc_state_t best_state;
 
-	for (int e = 0; e < 256; e++) {
+	int entries = 256;
+	if (samples[0] == 0 && samples[1] == 0 && samples[2] == 0 && samples[3] == 0) {
+		entries = 1;
+	}
+
+	for (int e = 0; e < entries; e++) {
 		qsa_enc_state_t trial = *state;
 		double cost = 0;
 		double plain = 0;
 
 		for (int i = 0; i < 4; i++) {
-			int residual = (qsa_codebook[e][i] * qsa_scale_tab[scale]) >> 8;
+			int residual = (codebook[e][i] * qsa_scale_tab[scale]) >> 8;
 			int reconstructed = qsa_clamp_s16(qsa_lms_predict(&trial.lms) + residual);
 			double error = (double)samples[i] - reconstructed;
 			double slope = error - trial.err_prev;
@@ -447,7 +476,10 @@ void *qsa_encode(const short *sample_data, qsa_desc *desc, unsigned int *out_len
 		desc->slice_samples < 4 ||
 		(desc->slice_samples & 3) ||
 		desc->chunk_samples % desc->slice_samples ||
-		desc->shape_lambda < 0
+		desc->shape_lambda < 0 ||
+		desc->codebook == NULL ||
+		desc->codebook[0][0] || desc->codebook[0][1] ||
+		desc->codebook[0][2] || desc->codebook[0][3]
 	) {
 		return NULL;
 	}
@@ -510,7 +542,8 @@ void *qsa_encode(const short *sample_data, qsa_desc *desc, unsigned int *out_len
 				for (unsigned int g = 0; g < groups; g++) {
 					double group_plain;
 					cost += qsa_encode_group(
-						chunk + s * slice + g * 4, scale, desc->shape_lambda,
+						chunk + s * slice + g * 4, desc->codebook,
+						scale, desc->shape_lambda,
 						&trial, codes + g, &group_plain
 					);
 					if (best_cost >= 0 && cost >= best_cost) { break; }
@@ -550,6 +583,10 @@ void *qsa_encode(const short *sample_data, qsa_desc *desc, unsigned int *out_len
 	qsa_write_u16(desc->chunk_samples, bytes + 12);
 	qsa_write_u16(desc->slice_samples, bytes + 14);
 	qsa_write_u32(desc->chunks, bytes + 16);
+	for (unsigned int i = 0; i < 256 * 4; i++) {
+		qsa_write_u16((unsigned short)desc->codebook[i >> 2][i & 3],
+			bytes + 20 + i * 2);
+	}
 	qsa_write_u32(p, bytes + QSA_HEADER_SIZE + desc->chunks * 4);
 
 	QSA_FREE(best_codes);
@@ -599,6 +636,17 @@ unsigned int qsa_decode_header(const unsigned char *bytes, unsigned int size, qs
 		return 0;
 	}
 
+	/* Read the codebook in place. It is little endian, and it is 4-aligned
+	after the 20 fixed bytes when the file is aligned. Entry 0 must be the
+	reserved vector of zeros. */
+	if (
+		qsa_read_u16(bytes + 20) || qsa_read_u16(bytes + 22) ||
+		qsa_read_u16(bytes + 24) || qsa_read_u16(bytes + 26)
+	) {
+		return 0;
+	}
+	desc->codebook = (const short (*)[4])(const void *)(bytes + 20);
+
 	return QSA_HEADER_SIZE;
 }
 
@@ -626,6 +674,7 @@ unsigned int qsa_decode_chunk(const unsigned char *bytes, unsigned int size, con
 
 	const unsigned char *nibbles = bytes + 4;
 	const unsigned char *residuals = nibbles + nibble_bytes;
+	const short (*codebook)[4] = desc->codebook;
 
 	for (unsigned int s = 0; s < slice_count; s++) {
 		/* A nibble and an index byte are always in range, thus no test is
@@ -634,7 +683,7 @@ unsigned int qsa_decode_chunk(const unsigned char *bytes, unsigned int size, con
 
 		for (unsigned int g = 0; g < slice / 4; g++) {
 			unsigned int n = s * slice + g * 4;
-			const short *vector = qsa_codebook[residuals[n >> 2]];
+			const short *vector = codebook[residuals[n >> 2]];
 			for (int i = 0; i < 4; i++) {
 				int dequantized = (vector[i] * scale) >> 8;
 				int reconstructed = qsa_clamp_s16(qsa_lms_predict(lms) + dequantized);
