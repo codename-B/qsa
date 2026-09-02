@@ -47,8 +47,10 @@ plain squared error; penalising the error slope shapes the quantisation noise
 to follow the signal instead of spreading it flat. This shaping is
 encoder-only; the bitstream and decoder know nothing of it. Finally, chunks
 (default 2048 samples) are indexed by byte offset, so a player can locate any
-chunk directly. The LMS state is not stored in the file, so seeking requires
-decoding from the start.
+chunk directly. The LMS state is encoded in every 16th chunk, so while playing
+you can seek to the nearest stored state without decoding from the start.
+QSA5 optionally applies pre-emphasis while encoding and de-emphasis while
+decoding; its coefficient is stored in the high byte of the sample rate.
 
 
 ## Tools
@@ -65,7 +67,13 @@ first.
 
 `--chunk-samples` (default 2048) sets the chunk length, `--slice-samples`
 (default 64) the scale period, and `--shape` (default 0.5) the noise shaping
-strength lambda. `--shape 0` gives plain MSE.
+strength lambda. `--shape 0` gives plain MSE. `--beam` (default 1) keeps more
+candidate paths during encoding; values from 4 to 8 improve quality but take
+longer. `--threads` sets the worker count when compiled with `QSA_THREADS`.
+`--energy` favours matching the source energy, while `--pns` does the same for
+noise-like slices instead of matching their exact waveform. Both options
+affect the encoder only. `--deemph A` writes QSA5 with pre-emphasis and
+de-emphasis; `A` must be at least 0 and less than 1, and 0 writes QSA4.
 
 `qsaplay` plays QSA files:
 
