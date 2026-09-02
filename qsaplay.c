@@ -31,8 +31,8 @@ To compile:
 /* Decodes a QSA file one chunk at a time and keeps the full file in memory.
 QSA uses about 2.7 kB for each second, thus one hour is less than 10 MB.
 
-The file does not hold the LMS state. Thus a seek decodes again from the
-first chunk. This is much faster than real time, and costs almost nothing. */
+The file holds an LMS state every 16 chunks. Thus a seek resumes from the
+nearest stored state. */
 
 typedef struct {
 	qsa_desc info;
@@ -172,14 +172,15 @@ void qsaplay_seek_chunk(qsaplay_desc *qp, int chunk) {
 		chunk = qp->info.chunks - 1;
 	}
 
-	/* Decode again from the first chunk to make the LMS state. */
-	qsaplay_rewind(qp);
-	while (qp->next_chunk < (unsigned int)chunk) {
-		if (!qsaplay_decode_chunk(qp)) {
-			return;
-		}
+	/* Restore the nearest stored LMS state. */
+	unsigned int checkpoint = (unsigned int)chunk -
+		(unsigned int)chunk % QSA_SEEK_CHUNK_INTERVAL;
+	if (!qsa_decode_seek_state(qp->bytes, qp->size, &qp->info,
+		checkpoint, &qp->lms)) {
+		return;
 	}
-	qp->sample_pos = chunk * qp->info.chunk_samples;
+	qp->next_chunk = checkpoint;
+	qp->sample_pos = checkpoint * qp->info.chunk_samples;
 	qp->sample_data_len = 0;
 	qp->sample_data_pos = 0;
 }
