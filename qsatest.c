@@ -5,11 +5,10 @@ SPDX-License-Identifier: MIT
 
 Round trip test for qsa.h.
 
-This implementation gives the QSA3 golden hashes. The decoded hash is the
-same as the QSA2 hash. QSA3 only adds the codebook to the header and
-exchanges entries 0 and 153 of the built-in table. Thus the same signal must
-decode to the same samples, because the encoder writes the new indices. The
-encoded size increases by QSA_CODEBOOK_SIZE bytes.
+This implementation gives the QSA4 golden hashes. The decoded hash is the
+same as the QSA3 hash. QSA4 only adds the seek-state table. Thus the same
+signal must decode to the same samples. The encoded size increases by
+QSA_SEEK_STATE_COUNT(chunks) * QSA_SEEK_STATE_SIZE bytes.
 
 The test signal uses only integer arithmetic. Thus you can make the same
 signal outside C. If a hash does not agree, qsa.h no longer obeys the format.
@@ -32,8 +31,8 @@ Give --dump-wav <path> to write the test signal to a WAV file.
 
 #define QSATEST_SAMPLES 83154
 
-#define QSATEST_ENCODED_SIZE 23852
-#define QSATEST_ENCODED_HASH 0x75eb8167ebb302a9ULL
+#define QSATEST_ENCODED_SIZE 23916
+#define QSATEST_ENCODED_HASH 0x2312a766d0daf6b7ULL
 #define QSATEST_DECODED_HASH 0x93fd0aae94d48c56ULL
 
 static int failures = 0;
@@ -127,6 +126,7 @@ int main(int argc, char **argv) {
 
 	unsigned int chunks = (QSATEST_SAMPLES + QSA_DEFAULT_CHUNK_SAMPLES - 1) / QSA_DEFAULT_CHUNK_SAMPLES;
 	QSATEST_CHECK(desc.chunks == chunks, "chunks %d, want %d", desc.chunks, chunks);
+	QSATEST_CHECK(QSA_SEEK_STATE_COUNT(desc.chunks) == 2, "seek state count is not 2");
 	QSATEST_CHECK(size <= qsa_max_encoded_size(&desc), "size %d over the bound", size);
 	QSATEST_CHECK(size == QSATEST_ENCODED_SIZE, "size %d, want %d", size, QSATEST_ENCODED_SIZE);
 
@@ -136,10 +136,39 @@ int main(int argc, char **argv) {
 		"encoded hash 0x%016llx, want 0x%016llx", encoded_hash, QSATEST_ENCODED_HASH
 	);
 
+	unsigned int chunks_start = QSA_HEADER_SIZE + (desc.chunks + 1) * 4 +
+		QSA_SEEK_STATE_COUNT(desc.chunks) * QSA_SEEK_STATE_SIZE;
+	QSATEST_CHECK(
+		qsa_read_u32(encoded + QSA_HEADER_SIZE) == chunks_start,
+		"first chunk does not skip the seek-state table"
+	);
+
+	qsa_lms_t sequential_lms;
+	qsa_lms_init(&sequential_lms);
+	short *chunk_samples = malloc(desc.chunk_samples * sizeof(short));
 	for (unsigned int c = 0; c < desc.chunks; c++) {
 		unsigned int start = qsa_read_u32(encoded + QSA_HEADER_SIZE + c * 4);
 		unsigned int end = qsa_read_u32(encoded + QSA_HEADER_SIZE + (c + 1) * 4);
 		unsigned int count = qsa_read_u16(encoded + start + 2);
+		if (c % QSA_SEEK_CHUNK_INTERVAL == 0) {
+			qsa_lms_t stored_lms;
+			QSATEST_CHECK(
+				qsa_decode_seek_state(encoded, size, &desc, c, &stored_lms),
+				"could not restore seek state for chunk %d", c
+			);
+			QSATEST_CHECK(
+				memcmp(stored_lms.history, sequential_lms.history, sizeof(stored_lms.history)) == 0,
+				"seek history differs at chunk %d", c
+			);
+			QSATEST_CHECK(
+				memcmp(stored_lms.weights, sequential_lms.weights, sizeof(stored_lms.weights)) == 0,
+				"seek weights differ at chunk %d", c
+			);
+			QSATEST_CHECK(
+				stored_lms.sample_index == sequential_lms.sample_index,
+				"seek sample index differs at chunk %d", c
+			);
+		}
 
 		QSATEST_CHECK((start & 3) == 0, "chunk %d offset %d not aligned", c, start);
 		QSATEST_CHECK(encoded[start] == 2, "chunk %d bits %d", c, encoded[start]);
@@ -148,7 +177,16 @@ int main(int argc, char **argv) {
 			end - start == QSA_CHUNK_SIZE(count, desc.slice_samples),
 			"chunk %d size %d", c, end - start
 		);
+		QSATEST_CHECK(
+			qsa_decode_chunk(encoded + start, end - start, &desc,
+				&sequential_lms, chunk_samples) == count,
+			"sequential test decode failed at chunk %d", c
+		);
 	}
+	QSATEST_CHECK(
+		!qsa_decode_seek_state(encoded, size, &desc, 1, &sequential_lms),
+		"restored a non-boundary seek state"
+	);
 
 	qsa_desc decoded_desc;
 	short *decoded = qsa_decode(encoded, size, &decoded_desc);
@@ -167,6 +205,23 @@ int main(int argc, char **argv) {
 		"decoded hash 0x%016llx, want 0x%016llx", decoded_hash, QSATEST_DECODED_HASH
 	);
 
+	unsigned int seek_chunk = QSA_SEEK_CHUNK_INTERVAL * 2;
+	qsa_lms_t seek_lms;
+	QSATEST_CHECK(
+		qsa_decode_seek_state(encoded, size, &decoded_desc, seek_chunk, &seek_lms),
+		"direct seek-state restore failed"
+	);
+	unsigned int seek_start = qsa_read_u32(encoded + QSA_HEADER_SIZE + seek_chunk * 4);
+	unsigned int seek_end = qsa_read_u32(encoded + QSA_HEADER_SIZE + (seek_chunk + 1) * 4);
+	unsigned int seek_count = qsa_decode_chunk(encoded + seek_start, seek_end - seek_start,
+		&decoded_desc, &seek_lms, chunk_samples);
+	QSATEST_CHECK(seek_count == decoded_desc.chunk_samples, "direct seek decode failed");
+	QSATEST_CHECK(
+		memcmp(chunk_samples, decoded + seek_chunk * decoded_desc.chunk_samples,
+			seek_count * sizeof(short)) == 0,
+		"direct seek samples differ from sequential decode"
+	);
+
 	double signal_energy = 0;
 	double error_energy = 0;
 	for (unsigned int i = 0; i < decoded_desc.samples; i++) {
@@ -180,6 +235,30 @@ int main(int argc, char **argv) {
 	/* The encoder measures the error across the pad samples too. Thus its
 	error is never less than the decoder's error. */
 	QSATEST_CHECK(desc.error >= error_energy, "encoder error below the decoder's");
+
+	qsa_desc beam_desc;
+	qsa_desc_init(&beam_desc);
+	beam_desc.samples = QSATEST_SAMPLES;
+	beam_desc.search_beam = 4;
+	unsigned int beam_size = 0;
+	unsigned char *beam_encoded = qsa_encode(samples, &beam_desc, &beam_size);
+	QSATEST_CHECK(beam_encoded, "beam encode returned NULL");
+	QSATEST_CHECK(beam_size == size, "beam size %d, want %d", beam_size, size);
+	qsa_desc beam_out;
+	short *beam_decoded = qsa_decode(beam_encoded, beam_size, &beam_out);
+	QSATEST_CHECK(beam_decoded, "beam decode returned NULL");
+	if (beam_decoded) {
+		double beam_err = 0;
+		for (unsigned int i = 0; i < beam_out.samples; i++) {
+			double d = samples[i] - beam_decoded[i];
+			beam_err += d * d;
+		}
+		double beam_snr = 10.0 * log10(signal_energy / beam_err);
+		printf("beam 4: snr %.2f db (greedy %.2f db)\n", beam_snr, snr);
+		QSATEST_CHECK(beam_snr > snr - 0.5, "beam snr %.2f well below greedy", beam_snr);
+		free(beam_decoded);
+	}
+	free(beam_encoded);
 
 	unsigned char truncated[QSA_MIN_FILESIZE + 8];
 	memcpy(truncated, encoded, sizeof(truncated));
@@ -196,6 +275,7 @@ int main(int argc, char **argv) {
 	printf(failures ? "%d checks failed\n" : "all checks passed\n", failures);
 
 	free(decoded);
+	free(chunk_samples);
 	free(encoded);
 	free(samples);
 	return failures ? 1 : 0;

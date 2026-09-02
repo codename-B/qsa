@@ -19,6 +19,9 @@ To compile:
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
+	#include <unistd.h>
+#endif
 
 #ifdef QSACONV_HAS_DRMP3
 	#define DR_MP3_IMPLEMENTATION
@@ -255,6 +258,17 @@ static void qsaconv_load_codebook(const char *path, qsa_desc *qsa) {
 	qsa->codebook = qsaconv_codebook;
 }
 
+static unsigned int qsaconv_cpu_count(void) {
+#ifdef _WIN32
+	const char *env = getenv("NUMBER_OF_PROCESSORS");
+	int n = env ? atoi(env) : 0;
+	return n > 0 ? (unsigned int)n : 1;
+#else
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	return n > 0 ? (unsigned int)n : 1;
+#endif
+}
+
 int main(int argc, char **argv) {
 	QSACONV_ASSERT(argc >= 3,
 		"\nUsage: qsaconv in.{wav,mp3,flac,qsa} out.{wav,qsa}"
@@ -262,6 +276,12 @@ int main(int argc, char **argv) {
 		"\n       [--codebook file.bin]   raw 2048-byte table, int16 LE,"
 		"\n                               entry 0 all-zero; replaces the"
 		"\n                               built-in codebook"
+		"\n       [--beam N]              encoder search width: 1 = greedy"
+		"\n                               (default), 4..8 = M-best, slower"
+		"\n                               but better; same bitstream format"
+		"\n       [--threads N]           encoder worker threads (default:"
+		"\n                               CPU count); output is identical"
+		"\n                               for any thread count"
 	)
 
 	qsaconv_pcm_desc desc;
@@ -269,6 +289,7 @@ int main(int argc, char **argv) {
 
 	qsa_desc qsa;
 	qsa_desc_init(&qsa);
+	qsa.threads = qsaconv_cpu_count();
 
 	for (int i = 3; i < argc; i += 2) {
 		QSACONV_ASSERT(i + 1 < argc, "Missing value for %s", argv[i]);
@@ -283,6 +304,24 @@ int main(int argc, char **argv) {
 		}
 		else if (strcmp(argv[i], "--codebook") == 0) {
 			qsaconv_load_codebook(argv[i + 1], &qsa);
+		}
+		else if (strcmp(argv[i], "--beam") == 0) {
+			qsa.search_beam = atoi(argv[i + 1]);
+		}
+		else if (strcmp(argv[i], "--threads") == 0) {
+			qsa.threads = atoi(argv[i + 1]);
+		}
+		else if (strcmp(argv[i], "--energy") == 0) {
+			qsa.energy_mu = atof(argv[i + 1]);
+		}
+		else if (strcmp(argv[i], "--pns") == 0) {
+			qsa.pns_threshold = atof(argv[i + 1]);
+		}
+		else if (strcmp(argv[i], "--deemph") == 0) {
+			double a = atof(argv[i + 1]);
+			QSACONV_ASSERT(a >= 0 && a < 1, "--deemph takes 0 <= a < 1");
+			qsa.deemph = (unsigned int)(a * 256.0 + 0.5);
+			if (qsa.deemph > 255) { qsa.deemph = 255; }
 		}
 		else {
 			QSACONV_ABORT("Unknown option %s", argv[i]);
