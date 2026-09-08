@@ -16,7 +16,7 @@ This is a fork of [phoboslab/qoa](https://github.com/phoboslab/qoa), the
 "Quite OK Audio Format". QSA is a direct descendant of it. The 4-tap
 sign-sign LMS predictor, the scale table and the slice idea are all QOA's.
 
-⚠️ This implementation has not yet been fuzzed. Don't use it with untrusted input.
+Demo project here: [itch.io link](https://codename-b.itch.io/opengoldberg)
 
 
 ## How QSA relates to QOA
